@@ -1,1 +1,1 @@
-# simple-cuda-driver-wrapper
+# Simple Cuda Driver Wrapper

@@ -1,0 +1,18 @@
+[package]
+name = "cuda-driver-wrapper"
+version = "0.1.0"
+edition = "2021"
+
+
+build = "build.rs"
+links = "cuda"
+
+[dependencies]
+libc = "0.2"
+ark-std = { version = "0.3", features = ["print-trace"] }
+colored = "2"
+rand = "0"
+
+[build-dependencies.cuda-config]
+path = "../build-config"
+version = "0.1.0"
