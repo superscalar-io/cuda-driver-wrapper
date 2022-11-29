@@ -249,10 +249,12 @@ impl DriverInterface {
                     return instance;
                 }
 
+                let filename_cstr = CString::new(filename).unwrap();
+
                 unsafe {
                     cuModuleLoad(
                         &mut instance.cu_module as *mut CUmodule,
-                        filename.as_ptr() as *const i8,
+                        filename_cstr.as_ptr(),
                     )
                 }
             }
