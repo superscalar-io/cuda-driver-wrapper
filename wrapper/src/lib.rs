@@ -1,9 +1,10 @@
 #![allow(non_snake_case, non_upper_case_globals, non_camel_case_types)]
 include!("driver-ffi.rs");
 
-use ark_std::{end_timer, start_timer};
+use ark_std::{end_timer, perf_trace::Colorize, start_timer};
 use std::ffi::{c_void, CString};
 use std::{collections::HashMap, fmt, hash::Hash, mem, ptr};
+use thousands::Separable;
 
 #[derive(Debug)]
 struct allocation_t {
@@ -348,6 +349,10 @@ impl DriverInterface {
         self.set_verbosity(1)
     }
 
+    pub fn high_verbosity(&mut self) {
+        self.set_verbosity(3)
+    }
+
     pub fn error_occured(&self) -> bool {
         self.last_error_code != Result::SUCCESS
     }
@@ -355,24 +360,31 @@ impl DriverInterface {
     pub fn last_error(&self) -> Result {
         self.last_error_code.clone()
     }
+
+    pub fn dump_error(&self) {
+        if self.verbosity > 1 && self.error_occured() {
+            println!(
+                "\n{}\n",
+                format!(
+                    "*** Error in cuda driver wrapper [ {} ] ***",
+                    self.last_error_code.to_string()
+                )
+                .red()
+                .bold(),
+            );
+        }
+    }
 }
 
 impl DriverInterface {
     pub fn add_allocations(&mut self, list_of_allocations_info: Vec<AddAllocationInfo>) -> Result {
-        //
-        //
-
-        let mut total_memory_required: usize = 0;
-
         let verbosity = self.verbosity;
 
+        let mut total_memory_required: usize = 0;
         for alloc_info in list_of_allocations_info.iter() {
-            if verbosity > 0 {
-                println!("{:?}", alloc_info);
-            }
-
             if self.dev_allocations.contains_key(alloc_info.key.as_str()) {
                 self.last_error_code = Result::ALLOCATION_KEY_EXIST(alloc_info.key.clone());
+                self.dump_error();
                 return self.last_error_code.clone();
             }
 
@@ -381,6 +393,7 @@ impl DriverInterface {
 
         if total_memory_required >= self.device_mem_cap {
             self.last_error_code = Result::OUT_OF_MEMORY(total_memory_required);
+            self.dump_error();
             return self.last_error_code.clone();
         }
 
@@ -404,6 +417,7 @@ impl DriverInterface {
                 CUresult::CUDA_SUCCESS => {}
                 cuda_error => {
                     self.last_error_code = Result::DRIVER_ERROR(cuda_error);
+                    self.dump_error();
                     return self.last_error_code.clone();
                 }
             }
@@ -430,7 +444,34 @@ impl DriverInterface {
 
             if copy_result != CUresult::CUDA_SUCCESS {
                 self.last_error_code = Result::DRIVER_ERROR(copy_result);
+                self.dump_error();
                 return self.last_error_code.clone();
+            }
+        }
+
+        if verbosity > 2 {
+            println!(
+                "\nCreated {} allocations on device {} totaling {} bytes",
+                list_of_allocations_info.len(),
+                0,
+                total_memory_required.separate_with_commas(),
+            );
+
+            for alloc_info in list_of_allocations_info.iter() {
+                println!(
+                    "  -  key : '{}' , element_size:{} , element_count:{}{}",
+                    alloc_info.key,
+                    alloc_info.el_size,
+                    alloc_info.el_count,
+                    if alloc_info.host_src != std::ptr::null_mut() {
+                        format!(
+                            "  ,  copied {} bytes to device",
+                            (alloc_info.el_size * alloc_info.el_count).separate_with_commas()
+                        )
+                    } else {
+                        format!("")
+                    }
+                );
             }
         }
 
@@ -441,6 +482,7 @@ impl DriverInterface {
         //
         if !self.dev_allocations.contains_key(key) {
             self.last_error_code = Result::ALLOCATION_KEY_NOT_FOUND(String::from(key));
+            self.dump_error();
             return self.last_error_code.clone();
         }
 
@@ -454,52 +496,68 @@ impl DriverInterface {
             return self.last_error_code.clone();
         }
 
+        let copy_size = mem::size_of::<T>() * std::cmp::min(src_data.len(), alloc.el_count);
+
         match unsafe {
-            cuMemcpyHtoD_v2(
-                alloc.dev_ptr,
-                src_data.as_ptr() as *const c_void,
-                mem::size_of::<T>() * std::cmp::min(src_data.len(), alloc.el_count),
-            )
+            cuMemcpyHtoD_v2(alloc.dev_ptr, src_data.as_ptr() as *const c_void, copy_size)
         } {
             CUresult::CUDA_SUCCESS => {
                 self.dev_allocations.get_mut(key).unwrap().copy_to_dev_count += 1;
-                return Result::SUCCESS;
             }
             cuda_error => {
                 self.last_error_code = Result::DRIVER_ERROR(cuda_error);
+                self.dump_error();
                 return self.last_error_code.clone();
             }
         }
+
+        if self.verbosity > 2 {
+            println!(
+                "Copied {} bytes to allocation '{}' on device {} ",
+                copy_size.separate_with_commas(),
+                key,
+                0,
+            );
+        }
+
+        Result::SUCCESS
     }
 
     pub fn copy_to_host<T>(&mut self, key: &str, dst_data: &mut Vec<T>) -> Result {
         //
         if !self.dev_allocations.contains_key(key) {
             self.last_error_code = Result::ALLOCATION_KEY_NOT_FOUND(String::from(key));
+            self.dump_error();
             return self.last_error_code.clone();
         }
 
         let alloc = self.dev_allocations.get(key).unwrap();
-
-        match unsafe {
-            cuMemcpyDtoH_v2(
-                dst_data.as_ptr() as *mut c_void,
-                alloc.dev_ptr,
-                mem::size_of::<T>() * std::cmp::min(dst_data.len(), alloc.el_count),
-            )
-        } {
+        let copy_size = mem::size_of::<T>() * std::cmp::min(dst_data.len(), alloc.el_count);
+        match unsafe { cuMemcpyDtoH_v2(dst_data.as_ptr() as *mut c_void, alloc.dev_ptr, copy_size) }
+        {
             CUresult::CUDA_SUCCESS => {
                 self.dev_allocations
                     .get_mut(key)
                     .unwrap()
                     .copy_from_dev_count += 1;
-                return Result::SUCCESS;
             }
             cuda_error => {
                 self.last_error_code = Result::DRIVER_ERROR(cuda_error);
+                self.dump_error();
                 return self.last_error_code.clone();
             }
         }
+
+        if self.verbosity > 2 {
+            println!(
+                "Copied {} bytes from allocation '{}' on device {} to host",
+                copy_size.separate_with_commas(),
+                key,
+                0,
+            );
+        }
+
+        Result::SUCCESS
     }
 
     pub fn total_mem_allocated(&self) -> usize {
@@ -534,6 +592,7 @@ impl DriverInterface {
                 }
                 None => {
                     self.last_error_code = Result::ALLOCATION_KEY_NOT_FOUND(String::from(key));
+                    self.dump_error();
                     return self.last_error_code.clone();
                 }
             }
@@ -549,6 +608,7 @@ impl DriverInterface {
             CUresult::CUDA_SUCCESS => {}
             cuda_error => {
                 self.last_error_code = Result::DRIVER_ERROR(cuda_error);
+                self.dump_error();
                 return self.last_error_code.clone();
             }
         }
@@ -567,6 +627,7 @@ impl DriverInterface {
             }
             cuda_error => {
                 self.last_error_code = Result::DRIVER_ERROR(cuda_error);
+                self.dump_error();
                 return self.last_error_code.clone();
             }
         }
@@ -606,7 +667,7 @@ impl DriverInterface {
             });
         }
 
-        match unsafe {
+        let launch_cu_result = unsafe {
             cuLaunchKernel(
                 cu_ftn,
                 dimension.gridDimX,
@@ -620,23 +681,27 @@ impl DriverInterface {
                 argument_pointers.as_mut_ptr() as *mut *mut c_void,
                 ptr::null_mut(),
             )
-        } {
-            CUresult::CUDA_SUCCESS => {
-                unsafe { cuStreamSynchronize(cu_stream) };
+        };
 
-                if verbosity > 0 {
-                    end_timer!(start_time);
-                }
-                return Result::SUCCESS;
-            }
+        match launch_cu_result {
+            CUresult::CUDA_SUCCESS => {}
             cuda_error => {
                 if verbosity > 0 {
                     end_timer!(start_time);
                 }
                 self.last_error_code = Result::DRIVER_ERROR(cuda_error);
+                self.dump_error();
                 return self.last_error_code.clone();
             }
         }
+
+        unsafe { cuStreamSynchronize(cu_stream) };
+
+        if verbosity > 0 {
+            end_timer!(start_time);
+        }
+
+        Result::SUCCESS
     }
 
     pub fn launch_kernel(
@@ -750,7 +815,7 @@ mod driver_interface_test {
         let mut drv_interface =
             DriverInterface::new(ModuleSource::PTX_TEXT(String::from(kernel_ptx)));
 
-        drv_interface.verbose();
+        drv_interface.high_verbosity();
 
         match drv_interface.last_error() {
             Result::SUCCESS => {}
