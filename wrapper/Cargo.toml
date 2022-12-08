@@ -13,6 +13,7 @@ ark-std = { version = "0.3", features = ["print-trace"] }
 colored = "2"
 rand = "0"
 thousands = "0.2.0"
+comfy-table = "6"  
 
 [build-dependencies.cuda-config]
 path = "../build-config"

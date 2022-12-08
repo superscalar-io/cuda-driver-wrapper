@@ -2,71 +2,352 @@
 include!("driver-ffi.rs");
 
 use ark_std::{end_timer, perf_trace::Colorize, start_timer};
+use comfy_table::modifiers::UTF8_ROUND_CORNERS;
+use comfy_table::presets::UTF8_FULL;
+use comfy_table::*;
 use std::ffi::{c_void, CString};
-use std::{collections::HashMap, fmt, hash::Hash, mem, ptr};
+use std::{collections::HashMap, fmt, hash::Hash, mem, ptr, result::Result};
 use thousands::Separable;
 
-#[derive(Debug)]
-struct allocation_t {
+#[derive(Default, Debug, Clone)]
+pub struct vec_allocation_info {
     dev_ptr: u64,
-    el_size: usize,
-    el_count: usize,
-    copy_to_dev_count: usize,
-    copy_from_dev_count: usize,
-    arg_buff: *mut u64, //buffer to hold launch argument pointer
-}
-const arg_buff_alloc_size: usize = 64;
-
-#[derive(Debug)]
-pub struct AddAllocationInfo {
-    key: String,
-    el_size: usize,
-    el_count: usize,
-    host_src: *mut c_void,
+    element_size: usize,
+    dim_x_size: usize,
+    dim_y_size: usize,
+    dim_z_size: usize,
 }
 
-pub trait TupleToAllocInfo {
-    fn get_allocation_info(&self) -> AddAllocationInfo;
-}
-
-impl TupleToAllocInfo for (&str, usize, usize) {
-    fn get_allocation_info(&self) -> AddAllocationInfo {
-        AddAllocationInfo {
-            key: String::from(self.0),
-            el_size: self.1,
-            el_count: usize::from(self.2),
-            host_src: std::ptr::null_mut(),
-        }
+impl vec_allocation_info {
+    pub fn byte_size(&self) -> usize {
+        self.element_size * self.dim_x_size * self.dim_y_size * self.dim_z_size
     }
 }
 
-impl<T> TupleToAllocInfo for (&str, &Vec<T>) {
-    fn get_allocation_info(&self) -> AddAllocationInfo {
-        AddAllocationInfo {
-            key: String::from(self.0),
-            el_size: std::mem::size_of::<T>(),
-            el_count: self.1.len(),
-            host_src: self.1.as_ptr() as *mut std::ffi::c_void,
-        }
+pub trait IntoVecAllocInfo {
+    fn into_vec_allocation_info(&self)
+        -> (String, vec_allocation_info, Option<Vec<*const c_void>>);
+}
+
+impl IntoVecAllocInfo for (&str, usize, usize) {
+    fn into_vec_allocation_info(
+        &self,
+    ) -> (String, vec_allocation_info, Option<Vec<*const c_void>>) {
+        (
+            String::from(self.0),
+            vec_allocation_info {
+                dev_ptr: 0,
+                element_size: self.1,
+                dim_x_size: self.2,
+                dim_y_size: 1,
+                dim_z_size: 1,
+            },
+            None,
+        )
+    }
+}
+
+impl<T> IntoVecAllocInfo for (&str, &Vec<T>) {
+    fn into_vec_allocation_info(
+        &self,
+    ) -> (String, vec_allocation_info, Option<Vec<*const c_void>>) {
+        (
+            String::from(self.0),
+            vec_allocation_info {
+                dev_ptr: 0,
+                element_size: std::mem::size_of::<T>(),
+                dim_x_size: self.1.len(),
+                dim_y_size: 1,
+                dim_z_size: 1,
+            },
+            Some(vec![self.1.as_ptr() as *const c_void]),
+        )
+    }
+}
+
+pub trait IntoTwoDimVecAllocInfo {
+    fn into_two_dim_vec_allocation_info(
+        &self,
+    ) -> (String, vec_allocation_info, Option<Vec<*const c_void>>);
+}
+
+impl IntoTwoDimVecAllocInfo for (&str, usize, usize, usize) {
+    fn into_two_dim_vec_allocation_info(
+        &self,
+    ) -> (String, vec_allocation_info, Option<Vec<*const c_void>>) {
+        (
+            String::from(self.0),
+            vec_allocation_info {
+                dev_ptr: 0,
+                element_size: self.1,
+                dim_x_size: self.2,
+                dim_y_size: self.3,
+                dim_z_size: 1,
+            },
+            None,
+        )
+    }
+}
+
+impl<T> IntoTwoDimVecAllocInfo for (&str, &Vec<Vec<T>>) {
+    fn into_two_dim_vec_allocation_info(
+        &self,
+    ) -> (String, vec_allocation_info, Option<Vec<*const c_void>>) {
+        (
+            String::from(self.0),
+            vec_allocation_info {
+                dev_ptr: 0,
+                element_size: std::mem::size_of::<T>(),
+                dim_x_size: self.1[0].len(),
+                dim_y_size: self.1.len(),
+                dim_z_size: 1,
+            },
+            Some({
+                let mut host_pointers: Vec<*const c_void> = Vec::with_capacity(self.1.len());
+                for i in 0..self.1.len() {
+                    host_pointers.push(self.1[i].as_ptr() as *const c_void);
+                }
+                host_pointers
+            }),
+        )
+    }
+}
+
+pub trait IntoThreeDimVecAllocInfo {
+    fn into_three_dim_vec_allocation_info(
+        &self,
+    ) -> (String, vec_allocation_info, Option<Vec<*const c_void>>);
+}
+
+impl IntoThreeDimVecAllocInfo for (&str, usize, usize, usize, usize) {
+    fn into_three_dim_vec_allocation_info(
+        &self,
+    ) -> (String, vec_allocation_info, Option<Vec<*const c_void>>) {
+        (
+            String::from(self.0),
+            vec_allocation_info {
+                dev_ptr: 0,
+                element_size: self.1,
+                dim_x_size: self.2,
+                dim_y_size: self.3,
+                dim_z_size: self.4,
+            },
+            None,
+        )
+    }
+}
+
+impl<T> IntoThreeDimVecAllocInfo for (&str, &Vec<Vec<Vec<T>>>) {
+    fn into_three_dim_vec_allocation_info(
+        &self,
+    ) -> (String, vec_allocation_info, Option<Vec<*const c_void>>) {
+        (
+            String::from(self.0),
+            vec_allocation_info {
+                dev_ptr: 0,
+                element_size: std::mem::size_of::<T>(),
+                dim_x_size: self.1[0][0].len(),
+                dim_y_size: self.1[0].len(),
+                dim_z_size: self.1.len(),
+            },
+            Some({
+                let mut host_pointers: Vec<*const c_void> = Vec::with_capacity(self.1.len());
+                for iz in 0..self.1.len() {
+                    for iy in 0..self.1[iz].len() {
+                        host_pointers.push(self.1[iz][iy].as_ptr() as *const c_void);
+                    }
+                }
+                host_pointers
+            }),
+        )
     }
 }
 
 #[macro_export]
-macro_rules! alloc_info {
+macro_rules! alloc_info_list {
     ( $( $x:expr ),* ) => {
         {
-            let mut temp_vec : Vec<AddAllocationInfo> = Vec::new() ;
+            let mut temp_vec : Vec<(String, vec_allocation_info, Option<Vec<*const  c_void>>)> = Vec::new() ;
             $(
-                temp_vec.push( $x.get_allocation_info() );
+                temp_vec.push( $x.into_vec_allocation_info() );
             )*
             temp_vec
         }
     };
 }
 
+#[macro_export]
+macro_rules! alloc_info_list_2D {
+    ( $( $x:expr ),* ) => {
+        {
+            let mut temp_vec : Vec<(String, vec_allocation_info, Option<Vec<*const  c_void>>)> = Vec::new() ;
+            $(
+                temp_vec.push( $x.into_two_dim_vec_allocation_info() );
+            )*
+            temp_vec
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! alloc_info_list_3D {
+    ( $( $x:expr ),* ) => {
+        {
+            let mut temp_vec : Vec<(String, vec_allocation_info, Option<Vec<*const  c_void>>)> = Vec::new() ;
+            $(
+                temp_vec.push( $x.into_three_dim_vec_allocation_info() );
+            )*
+            temp_vec
+        }
+    };
+}
+
+#[derive(Debug, Clone)]
+pub enum KernelParam {
+    ALLOC_KEY(String),
+    USIZE(usize),
+    ISIZE(isize),
+    UINT(u32),
+    INT(i32),
+    ULONG(u64),
+    LONG(i64),
+}
+
+#[derive(Debug, Default)]
+pub struct KernelParams {
+    param_list: Vec<KernelParam>,
+    param_pointers: Vec<*mut c_void>,
+}
+
+pub trait IntoKernelParam {
+    fn into_kernel_param(&self) -> KernelParam;
+}
+
+impl IntoKernelParam for str {
+    fn into_kernel_param(&self) -> KernelParam {
+        KernelParam::ALLOC_KEY(String::from(self))
+    }
+}
+
+impl IntoKernelParam for usize {
+    fn into_kernel_param(&self) -> KernelParam {
+        KernelParam::USIZE(*self)
+    }
+}
+
+impl IntoKernelParam for isize {
+    fn into_kernel_param(&self) -> KernelParam {
+        KernelParam::ISIZE(*self)
+    }
+}
+
+impl IntoKernelParam for u32 {
+    fn into_kernel_param(&self) -> KernelParam {
+        KernelParam::UINT(*self)
+    }
+}
+
+impl IntoKernelParam for i32 {
+    fn into_kernel_param(&self) -> KernelParam {
+        KernelParam::INT(*self)
+    }
+}
+
+impl IntoKernelParam for u64 {
+    fn into_kernel_param(&self) -> KernelParam {
+        KernelParam::ULONG(*self)
+    }
+}
+
+impl IntoKernelParam for i64 {
+    fn into_kernel_param(&self) -> KernelParam {
+        KernelParam::LONG(*self)
+    }
+}
+
+impl KernelParams {
+    pub fn add(&mut self, param: KernelParam) {
+        self.param_list.push(param);
+    }
+
+    pub fn get_param_ptr(
+        &mut self,
+        dev_allocations: &HashMap<String, vec_allocation_info>,
+    ) -> Result<*mut *mut c_void, Error> {
+        //
+
+        if self.param_pointers.len() == 0 {
+            const min_malloc_size: libc::size_t = 128;
+
+            for param in self.param_list.iter() {
+                let arg_buff = unsafe { libc::malloc(min_malloc_size) };
+                self.param_pointers.push(arg_buff);
+
+                match &param {
+                    //
+                    KernelParam::ALLOC_KEY(key) => match dev_allocations.get(key) {
+                        Some(alloc_info) => unsafe {
+                            *(arg_buff as *mut u64) = alloc_info.dev_ptr;
+                        },
+                        None => {
+                            return Err(Error::ALLOCATION_KEY_NOT_FOUND(String::from(key)));
+                        }
+                    },
+                    KernelParam::USIZE(val) => unsafe {
+                        *(arg_buff as *mut usize) = *val;
+                    },
+
+                    KernelParam::ISIZE(val) => unsafe {
+                        *(arg_buff as *mut isize) = *val;
+                    },
+
+                    KernelParam::UINT(val) => unsafe {
+                        *(arg_buff as *mut u32) = *val;
+                    },
+
+                    KernelParam::INT(val) => unsafe {
+                        *(arg_buff as *mut i32) = *val;
+                    },
+
+                    KernelParam::ULONG(val) => unsafe {
+                        *(arg_buff as *mut u64) = *val;
+                    },
+
+                    KernelParam::LONG(val) => unsafe {
+                        *(arg_buff as *mut i64) = *val;
+                    },
+                }
+            }
+        }
+
+        Ok(self.param_pointers.as_ptr() as *mut *mut c_void)
+    }
+}
+
+impl Drop for KernelParams {
+    fn drop(&mut self) {
+        for ptr in self.param_pointers.iter() {
+            unsafe { libc::free(*ptr) };
+        }
+    }
+}
+
+#[macro_export]
+macro_rules! kernel_param {
+    ( $( $x:expr ),* ) => {
+        {
+            let mut params : KernelParams = Default::default() ;
+            $(
+                params.add( $x.into_kernel_param ()) ;
+            )*
+            params
+        }
+    };
+}
+
 #[derive(Clone, Hash, PartialOrd, Ord, PartialEq, Eq)]
-pub enum Result {
-    SUCCESS,
+pub enum Error {
+    None,
     DRIVER_ERROR(CUresult),
     INVALID_KERNEL_FILE(String),
     ALLOCATION_KEY_EXIST(String),
@@ -75,24 +356,26 @@ pub enum Result {
     COPY_EXCEEDS_ALLOCATION(usize, usize),
 }
 
-impl Result {
+impl Error {
     fn get_msg(&self) -> String {
         match self {
-            Result::SUCCESS => format!("Success"),
-            Result::DRIVER_ERROR(err) => format!("{:?}", err),
-            Result::INVALID_KERNEL_FILE(filename) => {
+            Error::None => {
+                format!("None")
+            }
+            Error::DRIVER_ERROR(err) => format!("{:?}", err),
+            Error::INVALID_KERNEL_FILE(filename) => {
                 format!("Cannot open kernel file '{}'", filename)
             }
-            Result::ALLOCATION_KEY_EXIST(key) => {
+            Error::ALLOCATION_KEY_EXIST(key) => {
                 format!("'{}' key exist in allocation list", key)
             }
-            Result::ALLOCATION_KEY_NOT_FOUND(key) => {
+            Error::ALLOCATION_KEY_NOT_FOUND(key) => {
                 format!("'{}' key not found in allocation list", key)
             }
-            Result::OUT_OF_MEMORY(required) => {
+            Error::OUT_OF_MEMORY(required) => {
                 format!("failed to allocate {} on device", required)
             }
-            Result::COPY_EXCEEDS_ALLOCATION(allocation_size, copy_size) => {
+            Error::COPY_EXCEEDS_ALLOCATION(allocation_size, copy_size) => {
                 format!(
                     "memory copy size ({}) exceeds allocation ({}) on device",
                     copy_size, allocation_size
@@ -102,13 +385,13 @@ impl Result {
     }
 }
 
-impl fmt::Debug for Result {
+impl fmt::Debug for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self.get_msg())
     }
 }
 
-impl fmt::Display for Result {
+impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self.get_msg())
     }
@@ -130,6 +413,13 @@ impl fmt::Display for CudaDim {
     }
 }
 
+fn get_default_timer_info() -> ark_std::perf_trace::TimerInfo {
+    ark_std::perf_trace::TimerInfo {
+        msg: "".to_string(),
+        time: std::time::Instant::now(),
+    }
+}
+
 #[derive(Debug)]
 pub enum ModuleSource {
     PTX_TEXT(String),
@@ -145,11 +435,11 @@ pub struct DriverInterface {
     device_mem_cap: usize,
     cu_context: CUcontext,
     cu_module: CUmodule,
-    dev_allocations: HashMap<String, allocation_t>,
+    dev_allocations: HashMap<String, vec_allocation_info>,
     clean_up_context_list: HashMap<u64, CUcontext>,
     clean_up_stream_list: HashMap<u64, CUstream>,
     clean_up_mudule_list: HashMap<u64, CUmodule>,
-    last_error_code: Result,
+    last_error: Error,
     verbosity: usize,
 }
 
@@ -167,14 +457,14 @@ impl DriverInterface {
             clean_up_context_list: HashMap::new(),
             clean_up_stream_list: HashMap::new(),
             clean_up_mudule_list: HashMap::new(),
-            last_error_code: Result::SUCCESS,
+            last_error: Error::None,
             verbosity: 0,
         };
 
         match unsafe { cuInit(0) } {
             CUresult::CUDA_SUCCESS => {}
             cuda_error => {
-                instance.last_error_code = Result::DRIVER_ERROR(cuda_error);
+                instance.last_error = Error::DRIVER_ERROR(cuda_error);
                 return instance;
             }
         }
@@ -182,7 +472,7 @@ impl DriverInterface {
         match unsafe { cuDriverGetVersion(&mut instance.driver_verison as *mut i32) } {
             CUresult::CUDA_SUCCESS => {}
             cuda_error => {
-                instance.last_error_code = Result::DRIVER_ERROR(cuda_error);
+                instance.last_error = Error::DRIVER_ERROR(cuda_error);
                 return instance;
             }
         }
@@ -190,7 +480,7 @@ impl DriverInterface {
         match unsafe { cuDeviceGetCount(&mut instance.device_count as *mut i32) } {
             CUresult::CUDA_SUCCESS => {}
             cuda_error => {
-                instance.last_error_code = Result::DRIVER_ERROR(cuda_error);
+                instance.last_error = Error::DRIVER_ERROR(cuda_error);
                 return instance;
             }
         }
@@ -198,7 +488,7 @@ impl DriverInterface {
         match unsafe { cuDeviceGet(&mut instance.device_handle as *mut CUdevice, 0) } {
             CUresult::CUDA_SUCCESS => {}
             cuda_error => {
-                instance.last_error_code = Result::DRIVER_ERROR(cuda_error);
+                instance.last_error = Error::DRIVER_ERROR(cuda_error);
                 return instance;
             }
         }
@@ -211,7 +501,7 @@ impl DriverInterface {
         } {
             CUresult::CUDA_SUCCESS => {}
             cuda_error => {
-                instance.last_error_code = Result::DRIVER_ERROR(cuda_error);
+                instance.last_error = Error::DRIVER_ERROR(cuda_error);
                 return instance;
             }
         }
@@ -232,7 +522,7 @@ impl DriverInterface {
                 instance.last_id_num += 1;
             }
             cuda_error => {
-                instance.last_error_code = Result::DRIVER_ERROR(cuda_error);
+                instance.last_error = Error::DRIVER_ERROR(cuda_error);
                 return instance;
             }
         }
@@ -246,7 +536,7 @@ impl DriverInterface {
             },
             ModuleSource::FILE(filename) => {
                 if !std::path::Path::new(&filename).exists() {
-                    instance.last_error_code = Result::INVALID_KERNEL_FILE(filename);
+                    instance.last_error = Error::INVALID_KERNEL_FILE(filename);
                     return instance;
                 }
 
@@ -269,7 +559,7 @@ impl DriverInterface {
                 instance.last_id_num += 1;
             }
             cuda_error => {
-                instance.last_error_code = Result::DRIVER_ERROR(cuda_error);
+                instance.last_error = Error::DRIVER_ERROR(cuda_error);
                 return instance;
             }
         }
@@ -280,10 +570,10 @@ impl DriverInterface {
 
 impl Drop for DriverInterface {
     fn drop(&mut self) {
-        for (_, _alloc) in self.dev_allocations.iter() {
-            let p = _alloc.dev_ptr as u64;
+        //
 
-            match unsafe { cuMemFree_v2(p) } {
+        for (_, alloc) in self.dev_allocations.iter() {
+            match unsafe { cuMemFree_v2(alloc.dev_ptr) } {
                 CUresult::CUDA_SUCCESS => {}
                 cuda_error => {
                     println!(
@@ -292,8 +582,6 @@ impl Drop for DriverInterface {
                     );
                 }
             }
-
-            unsafe { libc::free(_alloc.arg_buff as *mut c_void) };
         }
 
         for (_, cu_mod) in self.clean_up_mudule_list.iter() {
@@ -354,11 +642,11 @@ impl DriverInterface {
     }
 
     pub fn error_occured(&self) -> bool {
-        self.last_error_code != Result::SUCCESS
+        self.last_error != Error::None
     }
 
-    pub fn last_error(&self) -> Result {
-        self.last_error_code.clone()
+    pub fn last_error(&self) -> Error {
+        self.last_error.clone()
     }
 
     pub fn dump_error(&self) {
@@ -367,204 +655,304 @@ impl DriverInterface {
                 "\n{}\n",
                 format!(
                     "*** Error in cuda driver wrapper [ {} ] ***",
-                    self.last_error_code.to_string()
+                    self.last_error.to_string()
                 )
                 .red()
                 .bold(),
             );
         }
     }
+
+    fn return_error(&mut self, which_error: Error) -> Result<usize, Error> {
+        if self.verbosity > 1 {
+            println!(
+                "\n{}\n",
+                format!(
+                    "*** Error in cuda driver wrapper [ {} ] ***",
+                    which_error.to_string()
+                )
+                .red()
+                .bold(),
+            );
+        }
+
+        self.last_error = which_error.clone();
+
+        Result::Err(which_error)
+    }
 }
 
 impl DriverInterface {
-    pub fn add_allocations(&mut self, list_of_allocations_info: Vec<AddAllocationInfo>) -> Result {
-        let verbosity = self.verbosity;
+    //
 
+    pub fn add_allocations_2(
+        &mut self,
+        info_list: Vec<(String, vec_allocation_info, Option<Vec<*const c_void>>)>,
+        info_list_2: Vec<(String, vec_allocation_info, Option<Vec<*const c_void>>)>,
+    ) -> Result<usize, Error> {
+        let info_list: Vec<(String, vec_allocation_info, Option<Vec<*const c_void>>)> = info_list
+            .into_iter()
+            .chain(info_list_2.into_iter())
+            .collect();
+
+        self.add_allocations(info_list)
+    }
+
+    pub fn add_allocations_3(
+        &mut self,
+        info_list: Vec<(String, vec_allocation_info, Option<Vec<*const c_void>>)>,
+        info_list_2: Vec<(String, vec_allocation_info, Option<Vec<*const c_void>>)>,
+        info_list_3: Vec<(String, vec_allocation_info, Option<Vec<*const c_void>>)>,
+    ) -> Result<usize, Error> {
+        let info_list: Vec<(String, vec_allocation_info, Option<Vec<*const c_void>>)> = info_list
+            .into_iter()
+            .chain(info_list_2.into_iter())
+            .chain(info_list_3)
+            .collect();
+
+        self.add_allocations(info_list)
+    }
+
+    pub fn add_allocations(
+        &mut self,
+        info_list: Vec<(String, vec_allocation_info, Option<Vec<*const c_void>>)>,
+    ) -> Result<usize, Error> {
+        //
+
+        let verbosity = self.verbosity;
         let mut total_memory_required: usize = 0;
-        for alloc_info in list_of_allocations_info.iter() {
-            if self.dev_allocations.contains_key(alloc_info.key.as_str()) {
-                self.last_error_code = Result::ALLOCATION_KEY_EXIST(alloc_info.key.clone());
-                self.dump_error();
-                return self.last_error_code.clone();
+        let mut total_data_transfer_size: usize = 0;
+
+        for (key, alloc_info, host_ptrs) in info_list.iter() {
+            if self.dev_allocations.contains_key(key.as_str()) {
+                return self.return_error(Error::ALLOCATION_KEY_EXIST(key.clone()));
             }
 
-            total_memory_required += alloc_info.el_size * alloc_info.el_count;
+            total_memory_required += alloc_info.byte_size();
+
+            match &*host_ptrs {
+                Some(_) => {
+                    total_data_transfer_size += alloc_info.byte_size();
+                }
+                None => {}
+            }
         }
 
         if total_memory_required >= self.device_mem_cap {
-            self.last_error_code = Result::OUT_OF_MEMORY(total_memory_required);
-            self.dump_error();
-            return self.last_error_code.clone();
+            return self.return_error(Error::OUT_OF_MEMORY(total_memory_required));
         }
 
-        for alloc_info in list_of_allocations_info.iter() {
-            //
-            let mut alloc = allocation_t {
-                dev_ptr: 0,
-                el_size: alloc_info.el_size,
-                el_count: alloc_info.el_count,
-                arg_buff: ptr::null_mut(),
-                copy_to_dev_count: 0,
-                copy_from_dev_count: 0,
-            };
+        if verbosity > 2 {
+            let mut table = Table::new();
+            table
+                .load_preset(UTF8_FULL)
+                .apply_modifier(UTF8_ROUND_CORNERS)
+                .set_content_arrangement(ContentArrangement::Dynamic)
+                .set_width(300)
+                .set_header(vec![
+                    "Key",
+                    "Element Size",
+                    "Array Dimension",
+                    "Byte Size",
+                    "Copy To Device",
+                ]);
 
-            match unsafe {
-                cuMemAlloc_v2(
-                    &mut alloc.dev_ptr as *mut u64,
-                    alloc_info.el_size * alloc_info.el_count,
-                )
-            } {
-                CUresult::CUDA_SUCCESS => {}
+            let mut dim_x_width = 0;
+            let mut dim_y_width = 0;
+            let mut dim_z_width = 0;
+            for (_, alloc_info, _) in info_list.iter() {
+                dim_x_width = std::cmp::max(dim_x_width, alloc_info.dim_x_size.to_string().len());
+                dim_y_width = std::cmp::max(dim_y_width, alloc_info.dim_y_size.to_string().len());
+                dim_z_width = std::cmp::max(dim_z_width, alloc_info.dim_z_size.to_string().len());
+            }
+
+            for (key, alloc_info, host_ptrs) in info_list.iter() {
+                table.add_row(vec![
+                    format!("'{}'", key),
+                    format!("{}", alloc_info.element_size),
+                    format!(
+                        "[{:^dim_z_width$} x {:^dim_y_width$} x {:^dim_x_width$}]",
+                        alloc_info.dim_z_size,
+                        alloc_info.dim_y_size,
+                        alloc_info.dim_x_size,
+                        dim_z_width = dim_z_width,
+                        dim_y_width = dim_y_width,
+                        dim_x_width = dim_x_width,
+                    ),
+                    alloc_info.byte_size().separate_with_commas(),
+                    match host_ptrs {
+                        None => "".to_string(),
+                        Some(_) => "Y".to_string(),
+                    },
+                ]);
+            }
+
+            table.add_row(vec![
+                "",
+                "",
+                "",
+                total_memory_required.separate_with_commas().as_str(),
+                total_data_transfer_size.separate_with_commas().as_str(),
+            ]);
+
+            table
+                .column_mut(1)
+                .expect("")
+                .set_cell_alignment(CellAlignment::Center);
+
+            table
+                .column_mut(4)
+                .expect("")
+                .set_cell_alignment(CellAlignment::Center);
+
+            println!(
+                "\n {}",
+                format!("Create {} allocations on device", info_list.len())
+                    .underline()
+                    .bold()
+            );
+            println!("{table}");
+        }
+
+        let start_time = if verbosity > 2 {
+            start_timer!(|| { format!("{}", "Allocate and transfer data",) })
+        } else {
+            get_default_timer_info()
+        };
+
+        for (key, alloc_info, host_ptrs) in info_list.iter() {
+            let mut dev_ptr: u64 = 0;
+
+            match unsafe { cuMemAlloc_v2(&mut dev_ptr as *mut u64, alloc_info.byte_size()) } {
+                CUresult::CUDA_SUCCESS => {
+                    self.dev_allocations.insert(
+                        key.clone(),
+                        vec_allocation_info {
+                            dev_ptr,
+                            ..*alloc_info
+                        },
+                    );
+                }
                 cuda_error => {
-                    self.last_error_code = Result::DRIVER_ERROR(cuda_error);
-                    self.dump_error();
-                    return self.last_error_code.clone();
+                    if verbosity > 2 {
+                        end_timer!(start_time);
+                    }
+                    return self.return_error(Error::DRIVER_ERROR(cuda_error));
                 }
             }
 
-            alloc.arg_buff = unsafe { libc::malloc(arg_buff_alloc_size) as *mut u64 };
-            unsafe {
-                *alloc.arg_buff = alloc.dev_ptr;
-            }
+            match &*host_ptrs {
+                Some(list) => {
+                    let dim_x_byte_size = alloc_info.element_size * alloc_info.dim_x_size;
+                    let dim_x_byte_size_u64: u64 = (dim_x_byte_size).try_into().unwrap();
 
-            let copy_result = if alloc_info.host_src != std::ptr::null_mut() {
-                alloc.copy_to_dev_count += 1;
-                unsafe {
-                    cuMemcpyHtoD_v2(
-                        alloc.dev_ptr,
-                        alloc_info.host_src as *const c_void,
-                        alloc_info.el_size * alloc_info.el_count,
-                    )
+                    for i in 0..(alloc_info.dim_z_size * alloc_info.dim_y_size) {
+                        match unsafe { cuMemcpyHtoD_v2(dev_ptr, list[i], dim_x_byte_size) } {
+                            CUresult::CUDA_SUCCESS => {}
+                            cuda_error => {
+                                if verbosity > 2 {
+                                    end_timer!(start_time);
+                                }
+                                return self.return_error(Error::DRIVER_ERROR(cuda_error));
+                            }
+                        }
+                        dev_ptr += dim_x_byte_size_u64;
+                    }
                 }
-            } else {
-                CUresult::CUDA_SUCCESS
-            };
-
-            self.dev_allocations.insert(alloc_info.key.clone(), alloc);
-
-            if copy_result != CUresult::CUDA_SUCCESS {
-                self.last_error_code = Result::DRIVER_ERROR(copy_result);
-                self.dump_error();
-                return self.last_error_code.clone();
+                None => {}
             }
         }
 
         if verbosity > 2 {
-            println!(
-                "\nCreated {} allocations on device {} totaling {} bytes",
-                list_of_allocations_info.len(),
-                0,
-                total_memory_required.separate_with_commas(),
-            );
-
-            for alloc_info in list_of_allocations_info.iter() {
-                println!(
-                    "  -  key : '{}' , element_size:{} , element_count:{}{}",
-                    alloc_info.key,
-                    alloc_info.el_size,
-                    alloc_info.el_count,
-                    if alloc_info.host_src != std::ptr::null_mut() {
-                        format!(
-                            "  ,  copied {} bytes to device",
-                            (alloc_info.el_size * alloc_info.el_count).separate_with_commas()
-                        )
-                    } else {
-                        format!("")
-                    }
-                );
-            }
+            end_timer!(start_time);
         }
 
-        Result::SUCCESS
+        Ok(total_memory_required)
     }
 
-    pub fn copy_to_device<T>(&mut self, key: &str, src_data: &Vec<T>) -> Result {
+    pub fn copy_vec_to_device<T>(&mut self, key: &str, src_data: &Vec<T>) -> Result<usize, Error> {
         //
-        if !self.dev_allocations.contains_key(key) {
-            self.last_error_code = Result::ALLOCATION_KEY_NOT_FOUND(String::from(key));
-            self.dump_error();
-            return self.last_error_code.clone();
-        }
 
-        let alloc = self.dev_allocations.get(key).unwrap();
+        let alloc_info = match self.dev_allocations.get(key) {
+            None => {
+                return self.return_error(Error::ALLOCATION_KEY_NOT_FOUND(String::from(key)));
+            }
+            Some(alloc_info) => alloc_info,
+        };
 
-        if (mem::size_of::<T>() * src_data.len()) > (alloc.el_size * alloc.el_count) {
-            self.last_error_code = Result::COPY_EXCEEDS_ALLOCATION(
-                alloc.el_size * alloc.el_count,
-                mem::size_of::<T>() * src_data.len(),
-            );
-            return self.last_error_code.clone();
-        }
-
-        let copy_size = mem::size_of::<T>() * std::cmp::min(src_data.len(), alloc.el_count);
+        let copy_size = std::cmp::min(mem::size_of::<T>() * src_data.len(), alloc_info.byte_size());
 
         match unsafe {
-            cuMemcpyHtoD_v2(alloc.dev_ptr, src_data.as_ptr() as *const c_void, copy_size)
+            cuMemcpyHtoD_v2(
+                alloc_info.dev_ptr,
+                src_data.as_ptr() as *const c_void,
+                copy_size,
+            )
         } {
-            CUresult::CUDA_SUCCESS => {
-                self.dev_allocations.get_mut(key).unwrap().copy_to_dev_count += 1;
-            }
+            CUresult::CUDA_SUCCESS => {}
             cuda_error => {
-                self.last_error_code = Result::DRIVER_ERROR(cuda_error);
-                self.dump_error();
-                return self.last_error_code.clone();
+                return self.return_error(Error::DRIVER_ERROR(cuda_error));
             }
         }
 
         if self.verbosity > 2 {
             println!(
-                "Copied {} bytes to allocation '{}' on device {} ",
+                "\nCopied {} bytes from host to allocation '{}' on device {} ",
                 copy_size.separate_with_commas(),
                 key,
                 0,
             );
         }
 
-        Result::SUCCESS
+        Ok(copy_size)
     }
 
-    pub fn copy_to_host<T>(&mut self, key: &str, dst_data: &mut Vec<T>) -> Result {
+    pub fn copy_vec_to_host<T>(
+        &mut self,
+        key: &str,
+        dst_data: &mut Vec<T>,
+    ) -> Result<usize, Error> {
         //
-        if !self.dev_allocations.contains_key(key) {
-            self.last_error_code = Result::ALLOCATION_KEY_NOT_FOUND(String::from(key));
-            self.dump_error();
-            return self.last_error_code.clone();
-        }
 
-        let alloc = self.dev_allocations.get(key).unwrap();
-        let copy_size = mem::size_of::<T>() * std::cmp::min(dst_data.len(), alloc.el_count);
-        match unsafe { cuMemcpyDtoH_v2(dst_data.as_ptr() as *mut c_void, alloc.dev_ptr, copy_size) }
-        {
-            CUresult::CUDA_SUCCESS => {
-                self.dev_allocations
-                    .get_mut(key)
-                    .unwrap()
-                    .copy_from_dev_count += 1;
+        let alloc_info = match self.dev_allocations.get(key) {
+            None => {
+                return self.return_error(Error::ALLOCATION_KEY_NOT_FOUND(String::from(key)));
             }
+            Some(alloc_info) => alloc_info,
+        };
+
+        let copy_size = std::cmp::min(mem::size_of::<T>() * dst_data.len(), alloc_info.byte_size());
+
+        match unsafe {
+            cuMemcpyDtoH_v2(
+                dst_data.as_mut_ptr() as *mut c_void,
+                alloc_info.dev_ptr,
+                copy_size,
+            )
+        } {
+            CUresult::CUDA_SUCCESS => {}
             cuda_error => {
-                self.last_error_code = Result::DRIVER_ERROR(cuda_error);
-                self.dump_error();
-                return self.last_error_code.clone();
+                return self.return_error(Error::DRIVER_ERROR(cuda_error));
             }
         }
 
         if self.verbosity > 2 {
             println!(
-                "Copied {} bytes from allocation '{}' on device {} to host",
+                "\nCopied {} bytes from allocation '{}' on device {} to host",
                 copy_size.separate_with_commas(),
                 key,
                 0,
             );
         }
 
-        Result::SUCCESS
+        Ok(copy_size)
     }
 
     pub fn total_mem_allocated(&self) -> usize {
         let mut mem_alloc: usize = 0;
 
-        for (_, _alloc) in self.dev_allocations.iter() {
-            mem_alloc += _alloc.el_size * _alloc.el_count;
+        for (_, alloc_info) in self.dev_allocations.iter() {
+            mem_alloc += alloc_info.byte_size();
         }
 
         mem_alloc
@@ -572,44 +960,33 @@ impl DriverInterface {
 }
 
 impl DriverInterface {
+    //
+
     pub fn launch_kernel_with_dim(
         &mut self,
         function_name: &str,
-        allocations_as_function_arguments: Vec<&str>,
+        mut kernel_params: KernelParams,
         dimension: CudaDim,
-    ) -> Result {
+    ) -> Result<usize, Error> {
         //
-
-        let __function_name = CString::new(function_name).unwrap();
+        let verbosity = self.verbosity;
         let mut cu_ftn: CUfunction = ptr::null_mut();
-        let mut argument_pointers: Vec<*mut u64> =
-            Vec::with_capacity(allocations_as_function_arguments.len());
-
-        for key in allocations_as_function_arguments {
-            match self.dev_allocations.get(key) {
-                Some(alloc) => {
-                    argument_pointers.push(alloc.arg_buff);
-                }
-                None => {
-                    self.last_error_code = Result::ALLOCATION_KEY_NOT_FOUND(String::from(key));
-                    self.dump_error();
-                    return self.last_error_code.clone();
-                }
-            }
-        }
+        let param_ptr = match kernel_params.get_param_ptr(&self.dev_allocations) {
+            Ok(p) => p,
+            Err(e) => return self.return_error(e),
+        };
 
         match unsafe {
+            let function_name = CString::new(function_name).unwrap();
             cuModuleGetFunction(
                 &mut cu_ftn as *mut CUfunction,
                 self.cu_module,
-                __function_name.as_ptr(),
+                function_name.as_ptr(),
             )
         } {
             CUresult::CUDA_SUCCESS => {}
             cuda_error => {
-                self.last_error_code = Result::DRIVER_ERROR(cuda_error);
-                self.dump_error();
-                return self.last_error_code.clone();
+                return self.return_error(Error::DRIVER_ERROR(cuda_error));
             }
         }
 
@@ -626,46 +1003,39 @@ impl DriverInterface {
                 self.last_id_num += 1;
             }
             cuda_error => {
-                self.last_error_code = Result::DRIVER_ERROR(cuda_error);
-                self.dump_error();
-                return self.last_error_code.clone();
+                return self.return_error(Error::DRIVER_ERROR(cuda_error));
             }
         }
 
-        let mut start_time = ark_std::perf_trace::TimerInfo {
-            msg: "".to_string(),
-            time: std::time::Instant::now(),
-        };
-
-        let verbosity = self.verbosity;
-
-        if verbosity > 0 {
-            start_time = start_timer!(|| {
+        let start_time = if verbosity > 0 {
+            start_timer!(|| {
                 format!(
                     "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
                     "Cuda Launch [",
                     " function : ".dimmed(),
-                    function_name.red().bold(),
+                    function_name.bold(),
                     "  grid : ".dimmed(),
-                    "{ x: ".red().bold(),
-                    dimension.gridDimX.to_string().red().bold(),
-                    ", y: ".red().bold(),
-                    dimension.gridDimY.to_string().red().bold(),
-                    ", z: ".red().bold(),
-                    dimension.gridDimZ.to_string().red().bold(),
-                    " }".red().bold(),
+                    "{ x: ".bold(),
+                    dimension.gridDimX.to_string().bold(),
+                    ", y: ".bold(),
+                    dimension.gridDimY.to_string().bold(),
+                    ", z: ".bold(),
+                    dimension.gridDimZ.to_string().bold(),
+                    " }".bold(),
                     "  block : ".dimmed(),
-                    "{ x: ".red().bold(),
-                    dimension.blockDimX.to_string().red().bold(),
-                    ", y: ".red().bold(),
-                    dimension.blockDimY.to_string().red().bold(),
+                    "{ x: ".bold(),
+                    dimension.blockDimX.to_string().bold(),
+                    ", y: ".bold(),
+                    dimension.blockDimY.to_string().bold(),
                     ", z: ".red().bold(),
-                    dimension.blockDimZ.to_string().red().bold(),
-                    " }".red().bold(),
+                    dimension.blockDimZ.to_string().bold(),
+                    " }".bold(),
                     " ]",
                 )
-            });
-        }
+            })
+        } else {
+            get_default_timer_info()
+        };
 
         let launch_cu_result = unsafe {
             cuLaunchKernel(
@@ -678,7 +1048,7 @@ impl DriverInterface {
                 dimension.blockDimZ,
                 0,
                 cu_stream,
-                argument_pointers.as_mut_ptr() as *mut *mut c_void,
+                param_ptr,
                 ptr::null_mut(),
             )
         };
@@ -689,9 +1059,7 @@ impl DriverInterface {
                 if verbosity > 0 {
                     end_timer!(start_time);
                 }
-                self.last_error_code = Result::DRIVER_ERROR(cuda_error);
-                self.dump_error();
-                return self.last_error_code.clone();
+                return self.return_error(Error::DRIVER_ERROR(cuda_error));
             }
         }
 
@@ -701,15 +1069,15 @@ impl DriverInterface {
             end_timer!(start_time);
         }
 
-        Result::SUCCESS
+        Ok(0)
     }
 
     pub fn launch_kernel(
         &mut self,
         function_name: &str,
-        allocations_as_function_arguments: Vec<&str>,
+        kernel_params: KernelParams,
         total_thread_count: usize,
-    ) -> Result {
+    ) -> Result<usize, Error> {
         let total_thread_cc = total_thread_count as std::os::raw::c_uint;
 
         let dimension = if total_thread_count <= 32 {
@@ -734,7 +1102,7 @@ impl DriverInterface {
             }
         };
 
-        self.launch_kernel_with_dim(function_name, allocations_as_function_arguments, dimension)
+        self.launch_kernel_with_dim(function_name, kernel_params, dimension)
     }
 }
 
@@ -797,8 +1165,7 @@ mod driver_interface_test {
     fn driver_interface_test() {
         let big_int_size: usize = mem::size_of::<bigInt256>();
         let array_size: usize = 1 << 16;
-        let mut A_in: Vec<bigInt256> = vec![Zero; array_size];
-        let mut B_in: Vec<bigInt256> = vec![Zero; array_size];
+        let mut AB_in: Vec<Vec<bigInt256>> = vec![vec![Zero; array_size]; 2];
         let mut Ans: Vec<bigInt256> = vec![Zero; array_size];
         let mut Out: Vec<bigInt256> = vec![Zero; array_size];
 
@@ -806,8 +1173,8 @@ mod driver_interface_test {
             let a = bigInt256Rnd();
             let b = bigInt256Rnd();
 
-            A_in[idx] = a;
-            B_in[idx] = b;
+            AB_in[0][idx] = a;
+            AB_in[1][idx] = b;
             Ans[idx] = add(&a, &b);
         }
 
@@ -817,45 +1184,81 @@ mod driver_interface_test {
 
         drv_interface.high_verbosity();
 
-        match drv_interface.last_error() {
-            Result::SUCCESS => {}
-            error_result => {
-                panic!("Error : {:?}", error_result);
-            }
+        if drv_interface.error_occured() {
+            drv_interface.dump_error();
+            panic!("");
         }
 
         println!("Deriver Version = {:?} ", drv_interface.driver_verison);
 
-        match drv_interface.add_allocations(alloc_info![
-            ("A_in", &A_in),
-            ("B_in", big_int_size, array_size),
-            ("Out", big_int_size, array_size)
-        ]) {
-            Result::SUCCESS => {}
-            error_result => {
-                panic!("Error : {:?}", error_result);
+        match drv_interface.add_allocations_2(
+            alloc_info_list![
+                ("A_in", &AB_in[0]),
+                ("B_in", big_int_size, array_size),
+                ("Out", big_int_size, array_size)
+            ],
+            alloc_info_list_2D![("AB_in", &AB_in)],
+        ) {
+            Err(e) => {
+                panic!("Error : {:?}", e);
+            }
+            Ok(_) => {}
+        }
+
+        match drv_interface.copy_vec_to_device("B_in", &AB_in[1]) {
+            Err(e) => {
+                panic!("Error : {:?}", e);
+            }
+            Ok(_) => {}
+        }
+
+        match drv_interface.launch_kernel(
+            "add_test",
+            kernel_param!["A_in", "B_in", "Out"],
+            array_size,
+        ) {
+            Err(e) => {
+                panic!("Error : {:?}", e);
+            }
+            Ok(_) => {}
+        }
+
+        match drv_interface.copy_vec_to_host("Out", &mut Out) {
+            Err(e) => {
+                panic!("Error : {:?}", e);
+            }
+            Ok(_) => {}
+        }
+
+        // Compare
+        for idx in 0..array_size {
+            if Ans[idx] != Out[idx] {
+                panic!(
+                    "\nResult @ index : {} did not match \n\tAns : {:?} \n\t!= \n\tOut : {:?}",
+                    idx, Ans[idx], Out[idx]
+                );
             }
         }
 
-        match drv_interface.copy_to_device("B_in", &B_in) {
-            Result::SUCCESS => {}
-            error_result => {
-                panic!("Error : {:?}", error_result);
+        //
+        // run second test with 'add_test_2Dim' function
+        //
+        match drv_interface.launch_kernel(
+            "add_test_2D_array_param",
+            kernel_param!["AB_in", array_size, "Out"],
+            array_size,
+        ) {
+            Err(e) => {
+                panic!("Error : {:?}", e);
             }
+            Ok(_) => {}
         }
 
-        match drv_interface.launch_kernel("add_test", vec!["A_in", "B_in", "Out"], array_size) {
-            Result::SUCCESS => {}
-            error_result => {
-                panic!("Error : {:?}", error_result);
+        match drv_interface.copy_vec_to_host("Out", &mut Out) {
+            Err(e) => {
+                panic!("Error : {:?}", e);
             }
-        }
-
-        match drv_interface.copy_to_host("Out", &mut Out) {
-            Result::SUCCESS => {}
-            error_result => {
-                panic!("Error : {:?}", error_result);
-            }
+            Ok(_) => {}
         }
 
         // Compare

@@ -1,5 +1,6 @@
 
 typedef unsigned __int128 u128;
+
 static_assert(sizeof(ulong) == 8);
 static_assert(sizeof(ulong2) == 16);
 static_assert(sizeof(ulong4) == 32);
@@ -42,4 +43,17 @@ extern "C" __global__ void add_test(
     DEC_IDX
 
     Out[thd_i] = add(A_in[thd_i], B_in[thd_i]);
+}
+
+extern "C" __global__ void add_test_2D_array_param(
+    const ulong4 *AB_in,
+    const size_t array_dim_x_size,
+    ulong4 *Out)
+{
+    DEC_IDX
+
+    const ulong4 a = AB_in[thd_i];
+    const ulong4 b = AB_in[array_dim_x_size + thd_i];
+
+    Out[thd_i] = add(a, b);
 }
